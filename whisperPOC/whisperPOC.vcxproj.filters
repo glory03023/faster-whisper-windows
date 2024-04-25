@@ -18,18 +18,12 @@
     <ClCompile Include="whisperPOC.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="whisper.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="whisper.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="wav_util.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="audio_util.h">
+    <ClInclude Include="faster-whisper.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="filters_vocab_en.h">

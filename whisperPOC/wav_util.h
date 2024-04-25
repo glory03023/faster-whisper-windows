@@ -61,6 +61,7 @@ std::vector<float> readWAVFile(const char* filename) {
     }
 
     // Print information from the header
+    std::cout << "Audio info" << std::endl;
     std::cout << "Audio Format: " << audio_format_str << std::endl;
     std::cout << "Num Channels: " << wav_header.num_channels << std::endl;
     std::cout << "Sample Rate: " << wav_header.sample_rate << std::endl;

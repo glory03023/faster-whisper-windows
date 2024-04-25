@@ -8,9 +8,7 @@
 #include "ctranslate2/models/whisper.h"
 
 #include "wav_util.h"
-#include "audio_util.h"
-#include "filters_vocab_en.h"
-#include "filters_vocab_multilingual.h"
+#include "faster-whisper.h"
 
 #include <windows.h>
 
@@ -23,7 +21,8 @@ int main(int argc, char* argv[])
 	cmd_options.add_options("General")
 		("h,help", "Display available options.")
 		("log_profiling", "Log execution profiling.", cxxopts::value<bool>()->default_value("false"))
-	;
+		("audio", "Path to the 16bit mono wav file to transcribe.", cxxopts::value<std::string>())
+		;
 
 
 	cmd_options.add_options("Device")
@@ -51,21 +50,10 @@ int main(int argc, char* argv[])
 			cxxopts::value<std::string>())
 		;
 	cmd_options.add_options("Data")
-		("src", "Path to the source file.",
-			cxxopts::value<std::string>())
-		("tgt", "Path to the target file to write transcription.",
-			cxxopts::value<std::string>())
-		("batch_size", "Size of the batch to forward into the model at once.",
-			cxxopts::value<size_t>()->default_value("32"))
-		("read_batch_size", "Size of the batch to read at once (defaults to batch_size).",
-			cxxopts::value<size_t>()->default_value("0"))
 		("max_queued_batches", "Maximum number of batches to load in advance (set -1 for unlimited, 0 for an automatic value).",
 			cxxopts::value<long>()->default_value("0"))
-		("batch_type", "Batch type (can be examples, tokens).",
-			cxxopts::value<std::string>()->default_value("examples"))
-		("max_input_length", "Truncate inputs after this many tokens (set 0 to disable).",
-			cxxopts::value<size_t>()->default_value("1024"))
-	;
+		;
+
 	auto args = cmd_options.parse(argc, argv);
 
 	if (args.count("help")) {
@@ -75,6 +63,10 @@ int main(int argc, char* argv[])
 
 	if (!args.count("model")) {
 		throw std::invalid_argument("Option --model is required to run whisperPOC");
+	}
+
+	if (!args.count("audio")) {
+		throw std::invalid_argument("Option --audio is required to run whisperPOC");
 	}
 
 	size_t inter_threads = args["inter_threads"].as<size_t>();
@@ -104,92 +96,63 @@ int main(int argc, char* argv[])
 	model_loader.compute_type = compute_type;
 	model_loader.num_replicas_per_device = inter_threads;
 
+
 	ctranslate2::models::Whisper whisper_pool(model_loader, pool_config);
-
-	/////////////// Load filters and vocab data ///////////////
-
-	const char* vocabData = nullptr;
-	bool isMultilingual = false;
-
-	if (isMultilingual)
-		vocabData = reinterpret_cast<const char*>(filters_vocab_multilingual);
-	else
-		vocabData = reinterpret_cast<const char*>(filters_vocab_en);
-
-	// Read the magic number
-	int magic = 0;
-	std::memcpy(&magic, vocabData, sizeof(magic));
-	vocabData += sizeof(magic);
-
-	// Check the magic number
-	if (magic != 0x57535052) { // 'WSPR'
-		std::cerr << "Invalid vocab data (bad magic)" << std::endl;
-		return -1;
-	}
-
-	// Load mel filters
-	std::memcpy(&filters.n_mel, vocabData, sizeof(filters.n_mel));
-	vocabData += sizeof(filters.n_mel);
-
-	std::memcpy(&filters.n_fft, vocabData, sizeof(filters.n_fft));
-	vocabData += sizeof(filters.n_fft);
-
-	std::cout << "n_mel:" << filters.n_mel << " n_fft:" << filters.n_fft << std::endl;
-
-	filters.data.resize(filters.n_mel * filters.n_fft);
-	std::memcpy(filters.data.data(), vocabData, filters.data.size() * sizeof(float));
-	vocabData += filters.data.size() * sizeof(float);
-
-
+	
+	//std::cout << "whisper replicas" << whisper_pool.num_replicas() << std::endl;
 
 	auto log_profiling = args["log_profiling"].as<bool>();
 	if (log_profiling)
 		ctranslate2::init_profiling(device, whisper_pool.num_replicas());
 
-	std::string audio_path = "jfk.wav";
-	if (args.count("src")) {
-		auto audio_path = args["src"].as<std::string>();
+
+	/////////////// Load filters and vocab data ///////////////
+	bool isMultilingual = (args["model"].as<std::string>() == "en");
+
+	if (!load_filterbank_and_vocab(isMultilingual)) {
+		return -1;
 	}
+
+	std::string audio_path = args["audio"].as<std::string>();
 
 	std::vector<float> samples = readWAVFile(audio_path.c_str());
 
-	size_t originalSize = samples.size();
-
 	const auto processor_count = std::thread::hardware_concurrency();
 
-
+	for (auto i = 0; i < WHISPER_SAMPLE_SIZE; i++) samples.push_back(0);
 	if (!log_mel_spectrogram(samples.data(), samples.size(), WHISPER_SAMPLE_RATE, WHISPER_N_FFT,
-		WHISPER_HOP_LENGTH, WHISPER_N_MEL, processor_count, filters, mel)) {
+		WHISPER_HOP_LENGTH, WHISPER_N_MEL, processor_count, g_filters, g_mel)) {
 		std::cerr << "Failed to compute mel spectrogram" << std::endl;
 		return 0;
 	}
 
+	pad_or_trim(g_mel);
+
 	ctranslate2::models::WhisperOptions whisper_options;
-	ctranslate2::Shape shape{ 1, mel.n_mel, mel.n_len };
-	ctranslate2::StorageView features(shape, mel.data, device);
-	std::vector<std::vector<std::string>> prompts;
+	ctranslate2::Shape shape{ 1, g_mel.n_mel, g_mel.n_len };
+	ctranslate2::StorageView features(shape, g_mel.data, device);
+
+
+	std::vector<size_t> sot_prompt = { (size_t)g_vocab.token_sot };
+	std::vector<std::vector<size_t>> prompts;
+	prompts.push_back(sot_prompt);
 
 	std::vector<std::future<ctranslate2::models::WhisperGenerationResult>> results;
 	results = whisper_pool.generate(features, prompts, whisper_options);
-
-	std::vector<ctranslate2::models::WhisperGenerationResult> outputs;
-
-	Sleep(100000);
-
-	for (auto & result : results) {
-		outputs.push_back(result.get());
-	}
-
-	for (auto output : outputs) {
-		for (auto sequence : output.sequences) {
-			for (auto word : sequence) {
-				printf("%s", word.c_str());
+	for (auto& result : results) {
+		ctranslate2::models::WhisperGenerationResult output = result.get();
+		for (auto sequence : output.sequences_ids) {
+			for (auto id : sequence) {
+				if (id == g_vocab.token_eot) break;
+				if (id < g_vocab.token_eot)
+					printf("%s", whisper_token_to_str(id));
 			}
-			puts("");
+			puts("\n");
+			break;
 		}
+		break;
 	}
 
-	puts("---------------");
 	if (log_profiling)
 		ctranslate2::dump_profiling(std::cerr);
 

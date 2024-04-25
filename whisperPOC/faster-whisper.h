@@ -10,6 +10,10 @@
 #include <string>
 #include <memory>
 
+#include "filters_vocab_en.h"
+#include "filters_vocab_multilingual.h"
+
+
 #include <corecrt_math_defines.h>
 
 // Define constants
@@ -19,13 +23,36 @@
 #define WHISPER_HOP_LENGTH 160
 #define WHISPER_CHUNK_SIZE 30
 #define WHISPER_MEL_LEN 3000
+#define WHISPER_SAMPLE_SIZE (WHISPER_SAMPLE_RATE * WHISPER_CHUNK_SIZE)
 
 // Forward declarations
+struct whisper_vocab;
 struct whisper_filters;
 struct whisper_mel;
 bool log_mel_spectrogram(const float* samples, const int n_samples, const int sample_rate,
     const int fft_size, const int fft_step, const int n_mel,
     const int n_threads, const whisper_filters& filters, whisper_mel& mel);
+
+// whisper_vocab structure
+struct whisper_vocab {
+
+    std::map<int, std::string> id_to_token;
+
+    int n_vocab_additional = 51864;
+
+    int token_eot = 50256;
+    int token_sot = 50257;
+    int token_prev = 50360;
+    int token_solm = 50361; // ??
+    int token_not = 50362; // no timestamps
+    int token_beg = 50363;
+
+    static const int token_translwordate = 50358;
+    static const int token_transcribe = 50359;
+};
+
+// Global whisper_vocab instance
+whisper_vocab g_vocab;
 
 // whisper_filters structure
 struct whisper_filters {
@@ -35,7 +62,7 @@ struct whisper_filters {
     std::vector<float> data;
 };
 
-whisper_filters filters;
+whisper_filters g_filters;
 
 // whisper_mel structure
 struct whisper_mel {
@@ -45,7 +72,103 @@ struct whisper_mel {
     std::vector<float> data;
 };
 
-whisper_mel mel;
+whisper_mel g_mel;
+
+// Convert a token to a string
+const char* whisper_token_to_str(int token) {
+    return g_vocab.id_to_token.at(token).c_str();
+}
+
+bool load_filterbank_and_vocab(bool isMultilingual) {
+    const char* vocabData = nullptr;
+
+    if (isMultilingual)
+        vocabData = reinterpret_cast<const char*>(filters_vocab_multilingual);
+    else
+        vocabData = reinterpret_cast<const char*>(filters_vocab_en);
+
+    // Read the magic number
+    int magic = 0;
+    std::memcpy(&magic, vocabData, sizeof(magic));
+    vocabData += sizeof(magic);
+
+    // Check the magic number
+    if (magic != 0x57535052) { // 'WSPR'
+        std::cerr << "Invalid vocab data (bad magic)" << std::endl;
+        return false;
+    }
+
+    // Load mel filters
+    std::memcpy(&g_filters.n_mel, vocabData, sizeof(g_filters.n_mel));
+    vocabData += sizeof(g_filters.n_mel);
+
+    std::memcpy(&g_filters.n_fft, vocabData, sizeof(g_filters.n_fft));
+    vocabData += sizeof(g_filters.n_fft);
+
+    std::cout << "Melfilterbak info: " << "n_mel:" << g_filters.n_mel << " n_fft:" << g_filters.n_fft << std::endl;
+
+    g_filters.data.resize(g_filters.n_mel * g_filters.n_fft);
+    std::memcpy(g_filters.data.data(), vocabData, g_filters.data.size() * sizeof(float));
+    vocabData += g_filters.data.size() * sizeof(float);
+
+    // Load vocab
+    int n_vocab = 0;
+    std::memcpy(&n_vocab, vocabData, sizeof(n_vocab));
+    vocabData += sizeof(n_vocab);
+
+    std::cout << "Vocab info: n_vocab:" << n_vocab << std::endl;
+
+    for (int i = 0; i < n_vocab; i++) {
+        int len = 0;
+        std::memcpy(&len, vocabData, sizeof(len));
+        vocabData += sizeof(len);
+
+        std::string word(vocabData, len);
+        vocabData += len;
+
+        g_vocab.id_to_token[i] = word;
+    }
+
+    // add additional vocab ids
+    int n_vocab_additional = 51864;
+    if (isMultilingual) {
+        n_vocab_additional = 51865;
+        g_vocab.token_eot++;
+        g_vocab.token_sot++;
+        g_vocab.token_prev++;
+        g_vocab.token_solm++;
+        g_vocab.token_not++;
+        g_vocab.token_beg++;
+    }
+
+    for (int i = n_vocab; i < n_vocab_additional; i++) {
+        std::string word;
+        if (i > g_vocab.token_beg) {
+            word = "[_TT_" + std::to_string(i - g_vocab.token_beg) + "]";
+        }
+        else if (i == g_vocab.token_eot) {
+            word = "[_EOT_]";
+        }
+        else if (i == g_vocab.token_sot) {
+            word = "[_SOT_]";
+        }
+        else if (i == g_vocab.token_prev) {
+            word = "[_PREV_]";
+        }
+        else if (i == g_vocab.token_not) {
+            word = "[_NOT_]";
+        }
+        else if (i == g_vocab.token_beg) {
+            word = "[_BEG_]";
+        }
+        else {
+            word = "[_extra_token_" + std::to_string(i) + "]";
+        }
+        g_vocab.id_to_token[i] = word;
+        // printf("%s: g_vocab[%d] = '%s'", __func__, i, word.c_str());
+    }
+    return true;
+}
 
 // Naive Discrete Fourier Transform
 void dft(const std::vector<float>& in, std::vector<float>& out) {
@@ -134,9 +257,6 @@ bool log_mel_spectrogram(const float* samples, const int n_samples, const int sa
     mel.n_len = (n_samples) / fft_step;
     mel.data.resize(mel.n_mel * mel.n_len);
 
-    // std::cout << "n_mel: " << mel.n_mel << std::endl;
-    // std::cout << "n_len: " << mel.n_len << std::endl;
-
     const int n_fft = 1 + fft_size / 2;
 
     std::vector<std::thread> workers(n_threads);
@@ -219,6 +339,30 @@ bool log_mel_spectrogram(const float* samples, const int n_samples, const int sa
     }
 
     return true;
+}
+
+void pad_or_trim(whisper_mel& mel) {
+    int i, j;
+    int origlen = mel.n_len;
+    mel.n_len = WHISPER_MEL_LEN;
+    if (origlen - WHISPER_MEL_LEN > WHISPER_MEL_LEN) {
+        for (j = 0; j < mel.n_mel; j++) {
+            for (i = 0; i < mel.n_len; i++) {
+                mel.data[j * mel.n_len + i] = mel.data[j * origlen + i];
+            }
+        }
+    }
+    else {
+        for (j = 0; j < mel.n_mel; j++) {
+            for (i = 0; i < origlen - WHISPER_MEL_LEN; i++) {
+                mel.data[j * mel.n_len + i] = mel.data[j * origlen + i];
+            }
+            for ( ; i < mel.n_len; i++) {
+                mel.data[j * mel.n_len + i] = 0;
+            }
+        }
+    }
+    mel.data.resize(mel.n_mel * mel.n_len);
 }
 
 #endif // _WHISPER_H_

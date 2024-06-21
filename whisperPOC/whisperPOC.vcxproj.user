@@ -1,11 +1,11 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <LocalDebuggerCommandArguments>--model C:\Users\kigrs\tmp --audio jfk.wav</LocalDebuggerCommandArguments>
+    <LocalDebuggerCommandArguments>--model D:\Work\ASR\Bin\faster-whisper-POC\tiny-en-float16-ct2 --audio jfk.wav</LocalDebuggerCommandArguments>
     <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <LocalDebuggerCommandArguments>--model C:\Users\kigrs\tmp --intra_threads 1 --compute_type  int8 --audio jfk.wav</LocalDebuggerCommandArguments>
+    <LocalDebuggerCommandArguments>--model D:\Work\ASR\Bin\faster-whisper-POC\tiny-en-float16-ct2 --audio jfk.wav</LocalDebuggerCommandArguments>
     <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
   </PropertyGroup>
 </Project>

@@ -1,6 +1,6 @@
 #include <fstream>
 #include <iostream>
-
+#include <stdexcept>
 #include <cxxopts.hpp>
 #include <ctranslate2/profiler.h>
 #include <ctranslate2/utils.h>
@@ -9,8 +9,6 @@
 
 #include "wav_util.h"
 #include "faster-whisper.h"
-
-#include <windows.h>
 
 
 int main(int argc, char* argv[])
@@ -138,9 +136,16 @@ int main(int argc, char* argv[])
 	prompts.push_back(sot_prompt);
 
 	std::vector<std::future<ctranslate2::models::WhisperGenerationResult>> results;
+	ctranslate2::models::WhisperGenerationResult output;
+
 	results = whisper_pool.generate(features, prompts, whisper_options);
 	for (auto& result : results) {
-		ctranslate2::models::WhisperGenerationResult output = result.get();
+		try {
+			output = result.get();
+		}
+		catch (std::exception& e){
+			std::cout << "Exception " << e.what() << std::endl;
+		}
 		for (auto sequence : output.sequences_ids) {
 			for (auto id : sequence) {
 				if (id == g_vocab.token_eot) break;
